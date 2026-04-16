@@ -292,8 +292,19 @@ class MAAPEarthCAREDownloader:
         input_mode: str = "list",
         csv_path: str | Path | None = None,
         date_column: str = "date_hour",
+        time_column: str | None = None,
+        csv_delimiter: str | None = None,
     ) -> list[str]:
-        """Load date-hour targets from a list (default) or from CSV file column."""
+        """Load date-hour targets from a list (default) or from CSV file column.
+
+        When reading from CSV, two modes are supported:
+        - Single column: ``date_column`` contains the full date-time string.
+        - Two columns: ``date_column`` (yyyy-mm-dd) and ``time_column`` (hh:mm:ss.sss)
+          are combined into a single date-time string.
+
+        ``csv_delimiter`` sets the column separator (e.g. ``','`` or ``';'``).
+        When ``None`` (default) the separator is detected automatically.  
+        """
         input_mode = input_mode.strip().lower()
         if input_mode not in {"list", "csv"}:
             raise ValueError("input_mode must be 'list' or 'csv'.")
@@ -315,18 +326,38 @@ class MAAPEarthCAREDownloader:
             raise FileNotFoundError(f"CSV file not found: {csv_file}")
 
         with csv_file.open("r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
+            if csv_delimiter is None:
+                sample = f.read(4096)
+                f.seek(0)
+                try:
+                    delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+                except csv.Error:
+                    delimiter = ","
+            else:
+                delimiter = csv_delimiter
+            reader = csv.DictReader(f, delimiter=delimiter)
             if reader.fieldnames is None or date_column not in reader.fieldnames:
                 raise ValueError(
                     f"Column '{date_column}' not found in CSV. "
                     f"Available columns: {reader.fieldnames}"
                 )
+            if time_column is not None and time_column not in reader.fieldnames:
+                raise ValueError(
+                    f"Column '{time_column}' not found in CSV. "
+                    f"Available columns: {reader.fieldnames}"
+                )
 
             cleaned = []
             for row in reader:
-                value = (row.get(date_column) or "").strip()
-                if value:
-                    cleaned.append(value)
+                date_val = (row.get(date_column) or "").strip()
+                if not date_val:
+                    continue
+                if time_column is not None:
+                    time_val = (row.get(time_column) or "").strip()
+                    value = f"{date_val} {time_val}" if time_val else date_val
+                else:
+                    value = date_val
+                cleaned.append(value)
 
         if not cleaned:
             raise ValueError(f"CSV '{csv_file}' has no valid values in column '{date_column}'.")
@@ -545,17 +576,26 @@ class MAAPEarthCAREDownloader:
         input_mode: str = "list",
         csv_path: str | Path | None = None,
         date_column: str = "date_hour",
+        time_column: str | None = None,
+        csv_delimiter: str | None = None,
         collection: str | None = None,
         search_minutes: int = 6,
         output_dir: str | Path = "/home/onel/Downloads",
         overwrite: bool = False,
     ) -> dict:
-        """Download products in batch from list/csv date-time inputs with progress and logging."""
+        """Download products in batch from list/csv date-time inputs with progress and logging.
+
+        When reading from CSV, the date-time can come from a single column (``date_column``)
+        or from two separate columns: ``date_column`` (yyyy-mm-dd) and ``time_column``
+        (hh:mm:ss.sss), which are combined automatically.
+        """
         targets = self.load_date_hours(
             date_hours=date_hours,
             input_mode=input_mode,
             csv_path=csv_path,
             date_column=date_column,
+            time_column=time_column,
+            csv_delimiter=csv_delimiter,
         )
 
         out_dir = Path(output_dir)
@@ -702,6 +742,8 @@ if __name__ == "__main__":
     'AUX_ORBPRE',   #@ predicted orbit file
     'AUX_ORBRES',   #@ restituted/reconstructed orbit file
 ]
+    
+    # Baselines
     frame_options = ["AB", "AC", "AD", "AE", "AF", "BA", "BB", "BC", "BD"]
 
     def choose_from_menu(title: str, options: list[str], allow_empty: bool = False) -> str | None:
@@ -777,16 +819,17 @@ if __name__ == "__main__":
     if not interactive:
         # Current behavior
         downloader.download_products_by_time(
-            product_type=default_product_type,
-            frame=default_frame,
-            date_hours=default_dates_to_download,
-            input_mode="list",
-            csv_path=None,
-            date_column="date_hour",
-            collection=default_collection,
-            search_minutes=default_search_minutes,
-            output_dir=default_output_dir,
-            overwrite=default_overwrite,
+            product_type="ATL_ALD_2A",
+            frame="BA",
+            date_hours=None,  # Ignored when input_mode="csv"
+            input_mode="csv", # Using CSV input mode to leverage the date_column and csv_path parameters, even if we have the dates in a list. This allows for more flexible future use without changing the code.
+            csv_path="/home/onel/Downloads/overpasses_25072024_20102025_MATCHES_12Z.csv",
+            date_column="yyyy-mm-dd",  # The column in the CSV that contains the date part
+            time_column="hh:mm:ss.sss",  # The column in the CSV that contains the time part (optional)
+            collection="EarthCAREL2InstChecked_MAAP",   # None = auto-detection
+            search_minutes=6,
+            output_dir="/media/onel/D/DATA/EarthCARE/AALD",
+            overwrite=False,
         )
     else:
         product_type = choose_from_menu("Select product_type:", product_type_options) or default_product_type
@@ -814,7 +857,7 @@ if __name__ == "__main__":
             input_mode="list",
             csv_path=None,
             date_column="date_hour",
-            collection=collection,   # None = auto-detection
+            collection=collection,
             search_minutes=search_minutes,
             output_dir=output_dir,
             overwrite=overwrite,
@@ -822,27 +865,5 @@ if __name__ == "__main__":
 
 
 
-#%%
-"""if __name__ == "__main__":
 
-    downloader = MAAPEarthCAREDownloader()
-
-    
-    dates_to_download = [
-        "2024-08-15 13:53",
-        "2025-07-28 00:32",
-    ]
-
-    downloader.download_products_by_time(
-        product_type="ATL_FM__2A",
-        frame="BA",
-        date_hours=dates_to_download,
-        input_mode="list",  # Use "csv" and csv_path="/path/file.csv" to load from file.
-        csv_path=None,
-        date_column="date_hour",
-        collection=None,
-        search_minutes=12,
-        output_dir="/home/onel/Downloads",
-        overwrite=False,
-    )"""
 #%%
