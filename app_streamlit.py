@@ -10,26 +10,29 @@ Description:
     Allows users to download EarthCARE products through a modern web interface.
 """
 
-import sys, os
+import sys
+import os
+import csv
+import io
+import shutil
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
 # make sure local package directory is first on path; prevents older PyPI
 # version from being imported when deployed to Streamlit Cloud.
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-import streamlit as st
 import pandas as pd
-import os
-from datetime import datetime
-import tempfile
-import shutil
+import streamlit as st
 
-# Import the downloader class
-from earthcare_downloader import EarthCareDownloader
-from aux_data import aux_dict_L1, aux_dict_L2
+# Import the MAAP downloader classes
+from maap_earthcare_downloader import CredentialsToken, MAAPEarthCAREDownloader
 
 # Page configuration
 st.set_page_config(
-    page_title="EarthCARE Data Downloader",
-    page_icon="🌍",
+    page_title="EarthCARE MAAP Downloader",
+    page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -225,43 +228,132 @@ dark_css = """
 
 st.markdown(dark_css, unsafe_allow_html=True)
 
+
+def parse_credentials_text(file_text: str) -> dict[str, str]:
+    """Parse a credentials file with KEY=VALUE lines."""
+    credentials = {}
+    for raw_line in file_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        credentials[key.strip()] = value.strip()
+    return credentials
+
+
+def detect_csv_delimiter(file_bytes: bytes) -> str | None:
+    """Best-effort delimiter detection for uploaded CSV files."""
+    sample = file_bytes[:4096].decode("utf-8", errors="ignore")
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        return None
+
+
+def auto_detect_columns(columns: list[str]) -> tuple[str | None, str | None]:
+    """Guess date and time columns from common names."""
+    normalized = {col: col.strip().lower() for col in columns}
+
+    date_keywords = ["date", "fecha", "day", "yyyy-mm-dd"]
+    time_keywords = ["time", "hora", "hh:mm", "utc"]
+
+    detected_date = next(
+        (col for col, lower in normalized.items() if any(key in lower for key in date_keywords)),
+        columns[0] if columns else None,
+    )
+    detected_time = next(
+        (col for col, lower in normalized.items() if any(key in lower for key in time_keywords)),
+        None,
+    )
+    return detected_date, detected_time
+
+
 # Title and description
-st.markdown("# EarthCARE Data Downloader")
+st.markdown("# EarthCARE MAAP Downloader")
 st.markdown("""
-Download EarthCARE data products from OADS easily and quickly.
+Download EarthCARE data products from the ESA MAAP catalog through a Streamlit interface.
 """)
 
 # ============================================================================
 # SIDEBAR - CREDENTIALS AND CONFIGURATION
 # ============================================================================
 
-st.sidebar.markdown("## 🔐 OADS Credentials")
+st.sidebar.markdown("## 🔐 MAAP Credentials")
+st.sidebar.caption("Upload a credentials file or enter the values manually.")
 
-username = st.sidebar.text_input(
-    "OADS Username:",
-    placeholder="Your OADS username",
-    key="username"
+uploaded_credentials_file = st.sidebar.file_uploader(
+    "Upload credentials file:",
+    type=["txt"],
+    help="Expected keys: OFFLINE_TOKEN, CLIENT_ID, CLIENT_SECRET"
 )
 
-password = st.sidebar.text_input(
-    "OADS Password:",
+if uploaded_credentials_file is not None:
+    try:
+        uploaded_credentials_text = uploaded_credentials_file.getvalue().decode("utf-8")
+        uploaded_credentials = parse_credentials_text(uploaded_credentials_text)
+        current_signature = (
+            uploaded_credentials_file.name,
+            len(uploaded_credentials_text),
+        )
+
+        if st.session_state.get("credentials_file_signature") != current_signature:
+            field_mapping = {
+                "offline_token": "OFFLINE_TOKEN",
+                "client_id": "CLIENT_ID",
+                "client_secret": "CLIENT_SECRET",
+            }
+            loaded_count = 0
+            for state_key, credential_key in field_mapping.items():
+                if uploaded_credentials.get(credential_key):
+                    st.session_state[state_key] = uploaded_credentials[credential_key]
+                    loaded_count += 1
+
+            st.session_state["credentials_file_signature"] = current_signature
+
+            if loaded_count == 3:
+                st.sidebar.success("Credentials file loaded successfully.")
+            elif loaded_count > 0:
+                st.sidebar.warning("The file was loaded, but some credential keys are missing.")
+            else:
+                st.sidebar.error("No valid credential entries were found in the uploaded file.")
+    except Exception as exc:
+        st.sidebar.error(f"Could not read the credentials file: {exc}")
+
+offline_token = st.sidebar.text_input(
+    "Offline Token:",
     type="password",
-    placeholder="Your OADS password",
-    key="password"
+    placeholder="Paste your MAAP offline token",
+    key="offline_token"
 )
+
+client_id = st.sidebar.text_input(
+    "Client ID:",
+    placeholder="Your MAAP client ID",
+    key="client_id"
+)
+
+client_secret = st.sidebar.text_input(
+    "Client Secret:",
+    type="password",
+    placeholder="Your MAAP client secret",
+    key="client_secret"
+)
+
+st.sidebar.caption("Credentials are only used during the current session.")
 
 # Collections
 collections = {
-    'EarthCARE L1 Products (Cal/Val Users)': 'EarthCAREL1InstChecked',
-    'EarthCARE L1 Products (Validated)': 'EarthCAREL1Validated',
-    'EarthCARE L2 Products (Cal/Val Users)': 'EarthCAREL2InstChecked',
-    'EarthCARE L2 Products (Validated)': 'EarthCAREL2Validated',
-    'EarthCARE L2 Products (Commissioning)': 'EarthCAREL2Products',
-    'EarthCARE Auxiliary Data': 'EarthCAREAuxiliary',
-    'EarthCARE Orbit Data': 'EarthCAREOrbitData',
-    'JAXA L2 Products (Cal/Val Users)': 'JAXAL2InstChecked',
-    'JAXA L2 Products (Validated)': 'JAXAL2Validated',
-    'JAXA L2 Products (Commissioning)': 'JAXAL2Products'
+    'Auto-detect from catalog': None,
+    'EarthCARE L1 Products (Cal/Val Users)': 'EarthCAREL1InstChecked_MAAP',
+    'EarthCARE L1 Products (Validated)': 'EarthCAREL1Validated_MAAP',
+    'EarthCARE L2 Products (Cal/Val Users)': 'EarthCAREL2InstChecked_MAAP',
+    'EarthCARE L2 Products (Validated)': 'EarthCAREL2Validated_MAAP',
+    'EarthCARE L2 Products (Commissioning)': 'EarthCAREL2Products_MAAP',
+    'EarthCARE Auxiliary Data': 'EarthCAREAuxiliary_MAAP',
+    'EarthCARE Orbit Data': 'EarthCAREOrbitData_MAAP',
+    'JAXA L2 Products (Cal/Val Users)': 'JAXAL2InstChecked_MAAP',
+    'JAXA L2 Products (Validated)': 'JAXAL2Validated_MAAP',
+    'JAXA L2 Products (Commissioning)': 'JAXAL2Products_MAAP'
 }
 
 # Product categories
@@ -282,12 +374,9 @@ product_categories = {
     'Orbit Data': ['MPL_ORBSCT', 'AUX_ORBPRE', 'AUX_ORBRES']
 }
 
-# Baselines
-baselines = ['Auto-detect', 'AA', 'AB', 'AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ',
-            'BA', 'BB', 'BC', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ']
-
-# Combine baseline dictionaries
-all_baselines = {**aux_dict_L1, **aux_dict_L2}
+# Frames / baselines available in the MAAP catalog
+baselines = ['AA', 'AB', 'AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ',
+             'BA', 'BB', 'BC', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ']
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## ⚙️ Configuration")
@@ -320,12 +409,18 @@ with tab1:
         # Show preview if file is uploaded
         if uploaded_file is not None:
             try:
-                df_preview = pd.read_csv(uploaded_file, nrows=5)
+                uploaded_bytes = uploaded_file.getvalue()
+                preview_delimiter = detect_csv_delimiter(uploaded_bytes)
+                df_preview = pd.read_csv(
+                    io.BytesIO(uploaded_bytes),
+                    nrows=5,
+                    sep=preview_delimiter or None,
+                    engine="python"
+                )
                 st.info(f"File loaded: **{uploaded_file.name}**")
                 st.markdown("**Preview (first 5 rows):**")
                 st.dataframe(df_preview, use_container_width=True)
-                
-                # Get all column names for orbit selection
+
                 csv_columns = df_preview.columns.tolist()
             except Exception as e:
                 st.error(f"❌ Error reading file: {e}")
@@ -347,52 +442,100 @@ with tab1:
             key="product_select"
         )
         
-        # Get available baselines for this product
-        available_baselines = ['Auto-detect']
-        if selected_product in all_baselines:
-            available_baselines.extend(all_baselines[selected_product])
-        
         baseline = st.selectbox(
-            "Baseline:",
-            available_baselines,
+            "Frame / Baseline:",
+            baselines,
+            index=baselines.index('BA') if 'BA' in baselines else 0,
             key="baseline_select",
-            help="Auto-detect will automatically select the most common baseline"
+            help="Select the frame version used in the MAAP catalog search"
         )
     
     # Advanced options
     with st.expander("⚙️ Advanced Options"):
         col_adv1, col_adv2 = st.columns(2)
-        
-        with col_adv1:
-            if uploaded_file is not None and csv_columns:
-                orbit_column = st.selectbox(
-                    "Orbit Number Column:",
-                    ['None'] + csv_columns,
-                    help="Select if your CSV contains orbit information"
+
+        if uploaded_file is not None:
+            current_bytes = uploaded_file.getvalue()
+            detected_delimiter = detect_csv_delimiter(current_bytes)
+            try:
+                csv_preview = pd.read_csv(
+                    io.BytesIO(current_bytes),
+                    nrows=5,
+                    sep=detected_delimiter or None,
+                    engine="python"
                 )
-                if orbit_column == 'None':
-                    orbit_column = None
+                csv_columns = csv_preview.columns.tolist()
+            except Exception:
+                csv_columns = []
+        else:
+            csv_columns = []
+            detected_delimiter = None
+
+        detected_date_col, detected_time_col = auto_detect_columns(csv_columns)
+
+        with col_adv1:
+            if csv_columns:
+                date_index = csv_columns.index(detected_date_col) if detected_date_col in csv_columns else 0
+                date_column = st.selectbox(
+                    "Date column:",
+                    csv_columns,
+                    index=date_index,
+                    help="Column containing the date or full datetime"
+                )
+
+                time_options = ['None'] + csv_columns
+                time_index = time_options.index(detected_time_col) if detected_time_col in time_options else 0
+                time_column = st.selectbox(
+                    "Time column (optional):",
+                    time_options,
+                    index=time_index,
+                    help="Optional column containing the time component"
+                )
+                if time_column == 'None':
+                    time_column = None
             else:
-                orbit_column = None
-                st.info("Upload a CSV file to see available columns")
-            
+                date_column = None
+                time_column = None
+                st.info("Upload a CSV file to select the date and time columns")
+
             override_files = st.checkbox(
                 "Override existing files",
                 value=False,
-                help="If enabled, will download files again even if they already exist"
+                help="If enabled, files will be downloaded again even if they already exist"
             )
-        
+
         with col_adv2:
-            verbose_mode = st.checkbox(
-                "Verbose output",
-                value=False,
-                help="Shows detailed information during processing"
+            delimiter_options = {
+                'Auto-detect': None,
+                'Comma (,)': ',',
+                'Semicolon (;)': ';',
+                'Tab': '\t',
+                'Pipe (|)': '|'
+            }
+            delimiter_labels = list(delimiter_options.keys())
+            default_delimiter_label = next(
+                (label for label, value in delimiter_options.items() if value == detected_delimiter),
+                'Auto-detect'
             )
-            
+            csv_delimiter_label = st.selectbox(
+                "CSV separator:",
+                delimiter_labels,
+                index=delimiter_labels.index(default_delimiter_label)
+            )
+            csv_delimiter = delimiter_options[csv_delimiter_label]
+
+            search_minutes = st.slider(
+                "Search window (minutes):",
+                min_value=3,
+                max_value=30,
+                value=6,
+                help="Time window around each target date to search in the MAAP catalog"
+            )
+
             st.markdown("**Download Information:**")
-            st.info(f"""
+            st.info("""
             📥 Files will be downloaded to a temporary folder.
-            You can download all files as ZIP after completion.
+            After completion, you can download all retrieved files as a ZIP archive.
             """)
     
     # Validation and download button
@@ -402,195 +545,193 @@ with tab1:
     
     with col_btn1:
         if st.button("START DOWNLOAD", type="primary", use_container_width=True):
-            # Validate inputs
             errors = []
-            
-            if not username.strip():
-                errors.append("❌ OADS username required")
-            if not password.strip():
-                errors.append("❌ OADS password required")
+
+            if not offline_token.strip():
+                errors.append("❌ MAAP offline token required")
+            if not client_id.strip():
+                errors.append("❌ Client ID required")
+            if not client_secret.strip():
+                errors.append("❌ Client secret required")
             if uploaded_file is None:
                 errors.append("❌ CSV file required")
-            
+            if uploaded_file is not None and not date_column:
+                errors.append("❌ Select a valid date column")
+
             if errors:
                 st.error("\n".join(errors))
             else:
-                # Create a placeholder for logs
                 log_container = st.container(border=True)
-                status_placeholder = log_container.status("Initializing download...", expanded=True)
+                status_placeholder = log_container.status("Initializing MAAP download...", expanded=True)
                 log_placeholder = status_placeholder.empty()
-                
-                # Add progress indicator
+
                 progress_col = st.columns(1)[0]
                 with progress_col:
                     st.markdown("**Download Progress**")
                     progress_bar = st.progress(0)
                     progress_text = st.empty()
-                # stop flag
-                if 'cancel' not in st.session_state:
-                    st.session_state.cancel = False
-                if st.button("⏹️ Stop download", key="stop_button"):
-                    st.session_state.cancel = True
 
-                def stop_check():
-                    return st.session_state.get('cancel', False)
-                
                 logs = []
-                
+                started_at = datetime.now()
+
                 try:
-                    with status_placeholder:
-                        # Save uploaded file to temporary location
-                        with tempfile.TemporaryDirectory() as temp_dir:
-                            # Save CSV temp file
-                            csv_temp_path = os.path.join(temp_dir, uploaded_file.name)
-                            with open(csv_temp_path, 'wb') as f:
-                                f.write(uploaded_file.getbuffer())
-                            
-                            # Create download directory
-                            download_dir = os.path.join(temp_dir, 'downloads')
-                            os.makedirs(download_dir, exist_ok=True)
-                            
-                            # Create downloader instance
-                            logs.append(f"Connecting as: {username}")
-                            
-                            baseline_filter = baseline if baseline != 'Auto-detect' else None
-                            
-                            downloader = EarthCareDownloader(
-                                username=username.strip(),
-                                password=password.strip(),
-                                collection=collection_id,
-                                baseline=baseline_filter,
-                                verbose=verbose_mode
-                            )
-                    
-                            logs.append(f"Collection: {collection_id}")
-                            logs.append(f"Product: {selected_product} | Baseline: {baseline}")
-                            
-                            # Update log display
-                            with log_placeholder.container():
-                                for log in logs:
-                                    st.write(log)
-                            
-                            # Read CSV to count entries
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        csv_temp_path = os.path.join(temp_dir, uploaded_file.name)
+                        with open(csv_temp_path, 'wb') as f:
+                            f.write(uploaded_file.getbuffer())
+
+                        credentials_path = os.path.join(temp_dir, 'credentials.txt')
+                        with open(credentials_path, 'w', encoding='utf-8') as f:
+                            f.write(f"OFFLINE_TOKEN={offline_token.strip()}\n")
+                            f.write(f"CLIENT_ID={client_id.strip()}\n")
+                            f.write(f"CLIENT_SECRET={client_secret.strip()}\n")
+
+                        download_dir = os.path.join(temp_dir, 'downloads')
+                        os.makedirs(download_dir, exist_ok=True)
+
+                        logs.append("Authenticating with MAAP...")
+                        credentials = CredentialsToken(credentials_file=Path(credentials_path))
+                        downloader = MAAPEarthCAREDownloader(credentials_token=credentials)
+
+                        logs.append(f"Collection: {collection_name}")
+                        logs.append(f"Product: {selected_product} | Frame: {baseline}")
+
+                        targets = downloader.load_date_hours(
+                            input_mode="csv",
+                            csv_path=csv_temp_path,
+                            date_column=date_column,
+                            time_column=time_column,
+                            csv_delimiter=csv_delimiter,
+                        )
+
+                        total_entries = len(targets)
+                        results = {
+                            "downloaded": [],
+                            "not_found": [],
+                            "errors": [],
+                            "skipped": [],
+                        }
+
+                        for idx, date_hour in enumerate(targets, start=1):
+                            progress_bar.progress((idx - 1) / max(total_entries, 1))
+                            progress_text.markdown(f"Processing {idx}/{total_entries}: {date_hour}")
+
                             try:
-                                df_check = pd.read_csv(csv_temp_path)
-                                total_entries = len(df_check)
-                            except:
-                                total_entries = 1
-                            
-                            # Progress tracker used by the downloader callback
-                            class ProgressTracker:
-                                def __init__(self):
-                                    self.processed = 0
-                                    self.downloaded = 0
-                                    self.total = total_entries
-                                
-                                def update(self, processed, downloaded):
-                                    # called by download_from_csv for every file and entry
-                                    self.processed = processed
-                                    self.downloaded = downloaded
-                                    
-                                    if self.total > 0:
-                                        # Calculate percentage based on downloaded files
-                                        files_pct = min(int((self.downloaded / self.total) * 100), 100)
-                                        progress_bar.progress(files_pct / 100.0)
-                                        progress_text.markdown(f"{files_pct}% - {self.downloaded}/{self.total} files")
-                                    if stop_check():
-                                        progress_text.markdown("Cancelled")
-                            
-                            tracker = ProgressTracker()
-                            
-                            # Update progress
-                            progress_bar.progress(0)
-                            progress_text.markdown("0% - Connecting to OADS...")
-                            
-                            summary = downloader.download_from_csv(
-                                csv_file_path=csv_temp_path,
-                                products=[selected_product],
-                                download_directory=download_dir,
-                                orbit_column=orbit_column,
-                                override=override_files,
-                                progress_callback=tracker.update,
-                                stop_callback=stop_check
-                            )
-                            
-                            # Update final progress
-                            if stop_check():
-                                progress_text.markdown(f"⚠️ Cancelled at {len(summary['downloaded_files'])}/{total_entries} files")
-                                status_placeholder.update(label="⚠️ Download cancelled", state="warning")
-                            else:
-                                progress_bar.progress(1.0)
-                                progress_text.markdown(f"✅ 100% - {len(summary['downloaded_files'])}/{total_entries} files")
-                                logs.append(f"🎉 Download completed!")
-                            
-                            # Update log display
-                            with log_placeholder.container():
-                                for log in logs:
-                                    st.write(log)
-                            
-                            status_placeholder.update(label="✅ Download completed", state="complete")
-                            
-                            # Show download button if files were downloaded
-                            if os.listdir(download_dir):
-                                st.markdown("---")
-                                
-                                # Create ZIP file
-                                zip_path = os.path.join(temp_dir, 'earthcare_downloads.zip')
-                                shutil.make_archive(
-                                    zip_path.replace('.zip', ''),
-                                    'zip',
-                                    download_dir
+                                product = downloader.find_product_by_time(
+                                    product_type=selected_product,
+                                    frame=baseline,
+                                    target_time=date_hour,
+                                    collection=collection_id,
+                                    search_minutes=search_minutes,
                                 )
-                                
-                                with open(zip_path, 'rb') as f:
-                                    st.download_button(
-                                        label="📥 Download Files (ZIP)",
-                                        data=f.read(),
-                                        file_name=f"earthcare_downloads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                                        mime="application/zip",
-                                        use_container_width=True
-                                    )
-                                
-                                # Show summary table
-                                st.markdown("### Detailed Summary")
-                                
-                                summary_data = {
-                                    'Metric': ['Entries processed', 'Files downloaded', 'Files skipped', 'Files failed', 'Total time'],
-                                    'Value': [
-                                        f"{summary['processed_entries']}/{summary['total_entries']}",
-                                        len(summary['downloaded_files']),
-                                        len(summary['skipped_files']),
-                                        len(summary['failed_files']),
-                                        summary['execution_time']
-                                    ]
-                                }
-                                st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
-                            else:
-                                st.warning("⚠️ No files were downloaded. Check your search parameters.")
-                
+
+                                if not product:
+                                    logs.append(f"⚠️ No file found for {date_hour}")
+                                    results["not_found"].append({"date_hour": date_hour})
+                                else:
+                                    output_file = Path(download_dir) / f"{product['name']}.h5"
+                                    if output_file.exists() and not override_files:
+                                        logs.append(f"⏭️ Skipped existing file: {product['name']}")
+                                        results["skipped"].append(
+                                            {
+                                                "date_hour": date_hour,
+                                                "name": product["name"],
+                                                "output": str(output_file),
+                                            }
+                                        )
+                                    else:
+                                        downloader.download_product(product["url"], output_file)
+                                        logs.append(f"✅ Downloaded: {product['name']}")
+                                        results["downloaded"].append(
+                                            {
+                                                "date_hour": date_hour,
+                                                "name": product["name"],
+                                                "output": str(output_file),
+                                            }
+                                        )
+                            except Exception as exc:
+                                logs.append(f"❌ Error for {date_hour}: {exc}")
+                                results["errors"].append({"date_hour": date_hour, "error": str(exc)})
+
+                            with log_placeholder.container():
+                                for log in logs[-12:]:
+                                    st.write(log)
+
+                        progress_bar.progress(1.0)
+                        progress_text.markdown(
+                            f"✅ 100% - {len(results['downloaded'])}/{total_entries} files downloaded"
+                        )
+
+                        elapsed = str(datetime.now() - started_at).split('.')[0]
+
+                        if results["errors"]:
+                            status_placeholder.update(label="⚠️ Download finished with some errors", state="warning")
+                        else:
+                            status_placeholder.update(label="✅ Download completed", state="complete")
+
+                        if os.listdir(download_dir):
+                            st.markdown("---")
+
+                            zip_path = os.path.join(temp_dir, 'earthcare_downloads.zip')
+                            shutil.make_archive(zip_path.replace('.zip', ''), 'zip', download_dir)
+
+                            with open(zip_path, 'rb') as f:
+                                st.download_button(
+                                    label="📥 Download Files (ZIP)",
+                                    data=f.read(),
+                                    file_name=f"earthcare_downloads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                                    mime="application/zip",
+                                    use_container_width=True
+                                )
+
+                            st.markdown("### Detailed Summary")
+
+                            summary_data = {
+                                'Metric': [
+                                    'Entries processed',
+                                    'Files downloaded',
+                                    'Files not found',
+                                    'Files skipped',
+                                    'Files with errors',
+                                    'Total time'
+                                ],
+                                'Value': [
+                                    total_entries,
+                                    len(results['downloaded']),
+                                    len(results['not_found']),
+                                    len(results['skipped']),
+                                    len(results['errors']),
+                                    elapsed
+                                ]
+                            }
+                            st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+                        else:
+                            status_placeholder.update(label="⚠️ No files were downloaded", state="warning")
+                            st.warning("⚠️ No files were downloaded. Check your CSV values, frame, and collection.")
+
                 except Exception as e:
                     status_placeholder.update(label="❌ Download error", state="error")
                     progress_bar.progress(0)
                     progress_text.markdown("❌ Download failed")
-                    
+
                     logs.append(f"❌ Error: {str(e)}")
-                    
+
                     with log_placeholder.container():
-                        for log in logs:
+                        for log in logs[-12:]:
                             st.write(log)
-                    
+
                     st.error(f"**Error during download:**\n\n{str(e)}")
 
 with tab2:
     st.markdown("""
     ### 📋 General Information
     
-    **EarthCARE Data Downloader** allows you to easily download EarthCARE data products
-    from the OADS catalog (ESA Open Access Data Service) automatically.
+    **EarthCARE MAAP Downloader** allows you to easily download EarthCARE data products
+    from the ESA MAAP catalog automatically.
     
     ### Features
     
-    - **Automatic downloads** from OADS
+    - **Automatic downloads** from the MAAP catalog
     - **Automatic detection** of CSV files (separator, date, time)
     - **Multiple collections** available
     - **Baseline filtering**
@@ -599,7 +740,7 @@ with tab2:
     
     ### User Guide
     
-    1. **Credentials**: Enter your OADS username and password
+    1. **Credentials**: Enter your MAAP offline token, client ID, and client secret
     2. **CSV File**: Upload your file with dates and times
     3. **Product**: Select the category and specific product
     4. **Start**: Click "Start Download"
@@ -624,7 +765,7 @@ with tab2:
     
     ### 🔗 Useful Links
     
-    - [OADS Portal](https://eocat.esa.int/)
+    - [ESA MAAP Portal](https://catalog.maap.eo.esa.int/)
     - [EarthCARE Mission](https://www.esa.int/Applications/Observing_the_Earth/EarthCARE)
     - [EarthCARE Documentation](https://www.esa.int/Applications/Observing_the_Earth/EarthCARE)
     """)
@@ -641,7 +782,7 @@ with tab3:
     
     #### Do I need to install anything?
     No, everything works in the browser. You only need:
-    - OADS credentials
+    - MAAP credentials
     - Your CSV file
     - Internet connection
     
@@ -653,8 +794,8 @@ with tab3:
     
     Typically takes between minutes to hours.
     
-    #### Where can I get OADS credentials?
-    Register at [OADS](https://eocat.esa.int/) with your ESA account.
+    #### Where can I get MAAP credentials?
+    Use your ESA MAAP account and generate the required token and client credentials.
     
     #### What if a download fails?
     - Verify your credentials
@@ -668,7 +809,7 @@ with tab3:
     - Or use the desktop application
     
     #### What happens to my password?
-    - Only sent to OADS for authentication
+    - Only used to authenticate against MAAP
     - Not stored on the server
     - Session is anonymous
     

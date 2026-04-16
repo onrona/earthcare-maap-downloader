@@ -19,8 +19,9 @@ except ImportError:
 
 ######################################################################################################
 
-# --- Path to credentials.txt --- 
-CREDENTIALS_FILE = Path("/media/onel/D/repositories/earthcare-data-downloader/platform_change_to_maap/credentials.txt")   # Insert the .txt path
+# --- Path to credentials.txt ---
+# Default to the credentials file stored alongside this script.
+CREDENTIALS_FILE = Path(__file__).with_name("credentials.txt")
 
 # --- Constants ---
 BASE_DATA_URL = "https://catalog.maap.eo.esa.int/data/earthcare-pdgs-01/EarthCARE/"
