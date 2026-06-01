@@ -253,7 +253,7 @@ class MAAPEarthCAREDownloader:
         assets = stac_item.get("assets", {})
         for _, asset in assets.items():
             href = asset.get("href", "")
-            if href.lower().endswith(".h5"):
+            if href.lower().endswith((".h5", ".eof")):
                 return href
         for _, asset in assets.items():
             href = asset.get("href", "")
@@ -261,15 +261,22 @@ class MAAPEarthCAREDownloader:
                 return href
         return None
 
-    def _detect_collection(self, product_type: str, frame: str, target: datetime) -> str | None:
+    @staticmethod
+    def _build_cql_filter(product_type: str, frame: str | None) -> str:
+        """Build CQL filter. If frame is missing, do not filter by version."""
+        conditions = [
+            f"productType = '{product_type}'",
+            "platform = 'EarthCARE'",
+        ]
+        if frame:
+            conditions.insert(1, f"version = '{frame}'")
+        return " and ".join(conditions)
+
+    def _detect_collection(self, product_type: str, frame: str | None, target: datetime) -> str | None:
         """Find which collection contains the requested EarthCARE product around target time."""
         window_start = (target - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         window_end = (target + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        cql_filter = (
-            f"productType = '{product_type}' and "
-            f"version = '{frame}' and "
-            "platform = 'EarthCARE'"
-        )
+        cql_filter = self._build_cql_filter(product_type, frame)
 
         for collection in self.earthcare_collections:
             try:
@@ -396,7 +403,7 @@ class MAAPEarthCAREDownloader:
     def search_segments_from_catalog(
         self,
         product_type: str,
-        frame: str,
+        frame: str | None,
         target_time,
         collection: str | None = None,
         search_minutes: int = 6,
@@ -407,24 +414,20 @@ class MAAPEarthCAREDownloader:
         chosen_collection = collection or self._detect_collection(product_type, frame, target)
         if not chosen_collection:
             raise RuntimeError(
-                "Not detected collection for the given productType/frame near the requested time. "
+                "Not detected collection for the given productType/frame criteria near the requested time. "
                 "Please provide the collection parameter manually."
             )
 
         window_start = (target - timedelta(minutes=search_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
         window_end = (target + timedelta(minutes=search_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        cql_filter = (
-            f"productType = '{product_type}' and "
-            f"version = '{frame}' and "
-            "platform = 'EarthCARE'"
-        )
+        cql_filter = self._build_cql_filter(product_type, frame)
         features = self._stac_search(
             collections=[chosen_collection],
             cql_filter=cql_filter,
             dt_start=window_start,
             dt_end=window_end,
-            limit=5,
+            limit=20 if frame is None else 5,
         )
 
         segments = []
@@ -448,7 +451,7 @@ class MAAPEarthCAREDownloader:
     def find_product_by_time(
         self,
         product_type: str,
-        frame: str,
+        frame: str | None,
         target_time,
         collection: str | None = None,
         search_minutes: int = 6,
@@ -464,7 +467,7 @@ class MAAPEarthCAREDownloader:
 
         Parameters:
             product_type : e.g. 'ATL_FM__2A' or 'MSI_COP_2A'
-            frame        : e.g. 'BA', 'E'
+            frame        : e.g. 'BA', 'E'. If None, version is not used as a filter.
             target_time  : datetime, or str in any readable format
                         e.g. '2025-05-09 14:40', '20250509T144033Z'
 
@@ -572,7 +575,7 @@ class MAAPEarthCAREDownloader:
     def download_products_by_time(
         self,
         product_type: str,
-        frame: str,
+        frame: str | None = None,
         date_hours: Iterable[str] | None = None,
         input_mode: str = "list",
         csv_path: str | Path | None = None,
@@ -662,22 +665,21 @@ class MAAPEarthCAREDownloader:
         )
         return results
 
-#%%
+
 #%%
 if __name__ == "__main__":
 
     downloader = MAAPEarthCAREDownloader()
 
     # Current values (fallback if the user does not want to enter data)
-    default_product_type = "ATL_FM__2A"
-    default_frame = "BA"
+    default_product_type = "MPL_ORBSCT"
+    default_frame = None
     default_dates_to_download = [
-        "2024-08-15 13:53",
-        "2025-07-28 00:32",
+        "2024-08-01 00:00",
     ]
     default_collection = None
     default_search_minutes = 12
-    default_output_dir = "/home/onel/Downloads"
+    default_output_dir = r"D:\onel\python\onel_orbitas\ZoneOverPass_WINDOWS64_v2_5_date_15_JUN_2023\earthcare"
     default_overwrite = False
 
     # Suggested options for menu
@@ -820,21 +822,25 @@ if __name__ == "__main__":
     if not interactive:
         # Current behavior
         downloader.download_products_by_time(
-            product_type="ATL_ALD_2A",
-            frame="BA",
+            product_type="ATL_EBD_2A",
+            frame=None,
             date_hours=None,  # Ignored when input_mode="csv"
             input_mode="csv", # Using CSV input mode to leverage the date_column and csv_path parameters, even if we have the dates in a list. This allows for more flexible future use without changing the code.
-            csv_path="/home/onel/Downloads/overpasses_25072024_20102025_MATCHES_12Z.csv",
+            csv_path=r"D:\EarthCARE\profiles_validation\Overpasses_20240801-20250831_100km_radius_GRASP_cleaned.csv", #"/home/onel/Downloads/overpasses_25072024_20102025_MATCHES_12Z.csv",
             date_column="yyyy-mm-dd",  # The column in the CSV that contains the date part
             time_column="hh:mm:ss.sss",  # The column in the CSV that contains the time part (optional)
             collection="EarthCAREL2InstChecked_MAAP",   # None = auto-detection
             search_minutes=6,
-            output_dir="/media/onel/D/DATA/EarthCARE/AALD",
+            output_dir=r"D:\EarthCARE\profiles_validation\AFM", #"D:\EarthCARE\ESA_files",
             overwrite=False,
         )
     else:
         product_type = choose_from_menu("Select product_type:", product_type_options) or default_product_type
-        frame = choose_from_menu("Select frame:", frame_options) or default_frame
+        frame = choose_from_menu(
+            "Select frame (or 0 for any/no version filter):",
+            frame_options,
+            allow_empty=True,
+        )
         dates_to_download = ask_dates()
 
         collection_options = EARTHCARE_COLLECTIONS[:]  # actual script options
