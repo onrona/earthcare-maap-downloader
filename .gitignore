@@ -20,6 +20,7 @@ data/
 .ipynb_checkpoints/
 
 # Local credentials and environment files
+credentials.txt
 credentials.local.txt
 .env
 .env.*
@@ -29,4 +30,3 @@ credentials.local.txt
 Thumbs.db
 .idea/
 .vscode/
-.txt
