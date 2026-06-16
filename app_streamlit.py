@@ -16,7 +16,7 @@ import csv
 import io
 import shutil
 import tempfile
-from datetime import datetime
+from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 
 # make sure local package directory is first on path; prevents older PyPI
@@ -268,6 +268,80 @@ def auto_detect_columns(columns: list[str]) -> tuple[str | None, str | None]:
     return detected_date, detected_time
 
 
+def format_date_hour(selected_date: date, selected_time: dt_time) -> str:
+    """Return a date-hour string accepted by the downloader."""
+    return f"{selected_date.isoformat()} {selected_time.strftime('%H:%M:%S')}"
+
+
+def split_date_hour_text(raw_text: str) -> list[str]:
+    """Split a text area with comma/newline/semicolon separated date-hour values."""
+    if not raw_text:
+        return []
+    normalized = raw_text.replace(";", "\n").replace(",", "\n")
+    return [line.strip() for line in normalized.splitlines() if line.strip()]
+
+
+def unique_preserving_order(values: list[str]) -> list[str]:
+    """Remove duplicates while keeping the user-entered order."""
+    seen = set()
+    cleaned = []
+    for value in values:
+        if value not in seen:
+            cleaned.append(value)
+            seen.add(value)
+    return cleaned
+
+
+def parse_time_list(raw_text: str) -> tuple[list[dt_time], list[str]]:
+    """Parse HH:MM style time values for range generation."""
+    values = split_date_hour_text(raw_text)
+    parsed = []
+    invalid = []
+
+    for value in values:
+        parsed_time = None
+        for fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%H:%M"):
+            try:
+                parsed_time = datetime.strptime(value, fmt).time()
+                break
+            except ValueError:
+                continue
+
+        if parsed_time is None:
+            invalid.append(value)
+        else:
+            parsed.append(parsed_time)
+
+    return parsed, invalid
+
+
+def build_range_targets(
+    selected_range: date | tuple[date, ...],
+    times_for_each_day: list[dt_time],
+) -> list[str]:
+    """Build one target per selected date and time in the inclusive date range."""
+    if isinstance(selected_range, tuple):
+        if len(selected_range) == 0:
+            return []
+        start_date = selected_range[0]
+        end_date = selected_range[-1]
+    else:
+        start_date = selected_range
+        end_date = selected_range
+
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    targets = []
+    current_date = start_date
+    while current_date <= end_date:
+        for selected_time in times_for_each_day:
+            targets.append(format_date_hour(current_date, selected_time))
+        current_date += timedelta(days=1)
+
+    return targets
+
+
 # Title and description
 st.markdown("# EarthCARE MAAP Downloader")
 st.markdown("""
@@ -376,7 +450,7 @@ product_categories = {
 
 # Frames / baselines available in the MAAP catalog
 baselines = ['AA', 'AB', 'AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ',
-             'BA', 'BB', 'BC', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ']
+             'BA', 'BB', 'BC', 'BD']
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## ⚙️ Configuration")
@@ -389,6 +463,33 @@ collection_name = st.sidebar.selectbox(
 )
 collection_id = collections[collection_name]
 
+baseline_options = ["Manual entry", "No baseline / code default"] + baselines
+baseline_mode = st.sidebar.selectbox(
+    "Frame / Baseline:",
+    baseline_options,
+    index=0,
+    key="baseline_mode_select",
+    help="Write a custom frame, choose a known frame, or leave it empty so the downloader does not filter by version."
+)
+
+if baseline_mode == "Manual entry":
+    baseline_manual = st.sidebar.text_input(
+        "Custom baseline:",
+        value=st.session_state.get("baseline_manual_value", "BA"),
+        key="baseline_manual_value",
+        help="Example: BA. Leave empty to let the downloader search without a version filter."
+    ).strip()
+    baseline = baseline_manual.upper() if baseline_manual else None
+elif baseline_mode == "No baseline / code default":
+    baseline = None
+else:
+    baseline = baseline_mode
+
+if baseline is None:
+    st.sidebar.caption("Baseline: none selected. The downloader will use its default/no-version search behavior.")
+else:
+    st.sidebar.caption(f"Baseline in use: {baseline}")
+
 # ============================================================================
 # MAIN CONTENT - TABS
 # ============================================================================
@@ -399,32 +500,98 @@ with tab1:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("### CSV File")
-        uploaded_file = st.file_uploader(
-            "Upload your CSV file with dates and times",
-            type=['csv'],
-            help="The file must contain columns with date and time. They will be detected automatically."
+        st.markdown("### Date-Time Targets")
+        input_method = st.radio(
+            "Choose how to define the date-times to download:",
+            ["CSV file", "Calendar range", "Manual date-times"],
+            horizontal=True,
+            key="date_input_method"
         )
-        
-        # Show preview if file is uploaded
-        if uploaded_file is not None:
-            try:
-                uploaded_bytes = uploaded_file.getvalue()
-                preview_delimiter = detect_csv_delimiter(uploaded_bytes)
-                df_preview = pd.read_csv(
-                    io.BytesIO(uploaded_bytes),
-                    nrows=5,
-                    sep=preview_delimiter or None,
-                    engine="python"
-                )
-                st.info(f"File loaded: **{uploaded_file.name}**")
-                st.markdown("**Preview (first 5 rows):**")
-                st.dataframe(df_preview, use_container_width=True)
 
-                csv_columns = df_preview.columns.tolist()
-            except Exception as e:
-                st.error(f"❌ Error reading file: {e}")
-                csv_columns = []
+        uploaded_file = None
+        range_targets = []
+        manual_targets = []
+
+        if input_method == "CSV file":
+            uploaded_file = st.file_uploader(
+                "Upload your CSV file with dates and times",
+                type=['csv'],
+                help="The file must contain columns with date and time. They will be detected automatically."
+            )
+
+            # Show preview if file is uploaded
+            if uploaded_file is not None:
+                try:
+                    uploaded_bytes = uploaded_file.getvalue()
+                    preview_delimiter = detect_csv_delimiter(uploaded_bytes)
+                    df_preview = pd.read_csv(
+                        io.BytesIO(uploaded_bytes),
+                        nrows=5,
+                        sep=preview_delimiter or None,
+                        engine="python"
+                    )
+                    st.info(f"File loaded: **{uploaded_file.name}**")
+                    st.markdown("**Preview (first 5 rows):**")
+                    st.dataframe(df_preview, width='stretch')
+
+                    csv_columns = df_preview.columns.tolist()
+                except Exception as e:
+                    st.error(f"❌ Error reading file: {e}")
+                    csv_columns = []
+        elif input_method == "Calendar range":
+            selected_date_range = st.date_input(
+                "Date range:",
+                value=(date.today(), date.today()),
+                help="The range is inclusive. One target will be generated for each selected time of each day."
+            )
+            range_times_text = st.text_area(
+                "Times for each day (UTC):",
+                value="00:00:00",
+                height=90,
+                help="Enter one or more times as HH:MM, HH:MM:SS, or HH:MM:SS.sss. Use one per line or comma-separated."
+            )
+            parsed_times, invalid_times = parse_time_list(range_times_text)
+            if invalid_times:
+                st.warning(f"These times could not be parsed and will be ignored: {', '.join(invalid_times)}")
+            range_targets = build_range_targets(selected_date_range, parsed_times)
+
+            if range_targets:
+                st.markdown("**Generated target date-times:**")
+                st.dataframe(pd.DataFrame({"date_hour": range_targets}), width='stretch', hide_index=True)
+            else:
+                st.info("Select a valid date range and at least one time.")
+        else:
+            if "manual_date_targets" not in st.session_state:
+                st.session_state["manual_date_targets"] = []
+
+            manual_col1, manual_col2 = st.columns(2)
+            with manual_col1:
+                manual_date = st.date_input("Date:", value=date.today(), key="manual_date_picker")
+            with manual_col2:
+                manual_time = st.time_input("Time (UTC):", value=dt_time(0, 0, 0), key="manual_time_picker")
+
+            action_col1, action_col2 = st.columns(2)
+            with action_col1:
+                if st.button("Add date-time", width='stretch'):
+                    new_target = format_date_hour(manual_date, manual_time)
+                    st.session_state["manual_date_targets"] = unique_preserving_order(
+                        st.session_state["manual_date_targets"] + [new_target]
+                    )
+            with action_col2:
+                if st.button("Clear manual list", width='stretch'):
+                    st.session_state["manual_date_targets"] = []
+
+            manual_text = st.text_area(
+                "Manual target list:",
+                value="\n".join(st.session_state["manual_date_targets"]),
+                height=160,
+                help="You can edit this list directly. Accepted formats are the same as the CSV-derived values."
+            )
+            manual_targets = unique_preserving_order(split_date_hour_text(manual_text))
+            st.session_state["manual_date_targets"] = manual_targets
+
+            if manual_targets:
+                st.dataframe(pd.DataFrame({"date_hour": manual_targets}), width='stretch', hide_index=True)
     
     with col2:
         st.markdown("### Product Selection")
@@ -441,14 +608,11 @@ with tab1:
             products_in_category,
             key="product_select"
         )
-        
-        baseline = st.selectbox(
-            "Frame / Baseline:",
-            baselines,
-            index=baselines.index('BA') if 'BA' in baselines else 0,
-            key="baseline_select",
-            help="Select the frame version used in the MAAP catalog search"
-        )
+
+        # st.info(
+        #     f"Baseline: **{baseline if baseline else 'None / code default'}**. "
+        #     "Change it from the sidebar."
+        # )
     
     # Advanced options
     with st.expander("⚙️ Advanced Options"):
@@ -544,7 +708,7 @@ with tab1:
     col_btn1, col_btn2 = st.columns([3, 1])
     
     with col_btn1:
-        if st.button("START DOWNLOAD", type="primary", use_container_width=True):
+        if st.button("START DOWNLOAD", type="primary", width='stretch'):
             errors = []
 
             if not offline_token.strip():
@@ -553,8 +717,8 @@ with tab1:
                 errors.append("❌ Client ID required")
             if not client_secret.strip():
                 errors.append("❌ Client secret required")
-            if uploaded_file is None:
-                errors.append("❌ CSV file required")
+            if uploaded_file is None and not range_targets and not manual_targets:
+                errors.append("❌ CSV file or target dates required")
             if uploaded_file is not None and not date_column:
                 errors.append("❌ Select a valid date column")
 
@@ -576,10 +740,6 @@ with tab1:
 
                 try:
                     with tempfile.TemporaryDirectory() as temp_dir:
-                        csv_temp_path = os.path.join(temp_dir, uploaded_file.name)
-                        with open(csv_temp_path, 'wb') as f:
-                            f.write(uploaded_file.getbuffer())
-
                         credentials_path = os.path.join(temp_dir, 'credentials.txt')
                         with open(credentials_path, 'w', encoding='utf-8') as f:
                             f.write(f"OFFLINE_TOKEN={offline_token.strip()}\n")
@@ -596,14 +756,30 @@ with tab1:
                         logs.append(f"Collection: {collection_name}")
                         logs.append(f"Product: {selected_product} | Frame: {baseline}")
 
-                        targets = downloader.load_date_hours(
-                            input_mode="csv",
-                            csv_path=csv_temp_path,
-                            date_column=date_column,
-                            time_column=time_column,
-                            csv_delimiter=csv_delimiter,
-                        )
+                        if uploaded_file is not None:
+                            csv_temp_path = os.path.join(temp_dir, uploaded_file.name)
+                            with open(csv_temp_path, 'wb') as f:
+                                f.write(uploaded_file.getbuffer())
 
+                            targets = downloader.load_date_hours(
+                                input_mode="csv",
+                                csv_path=csv_temp_path,
+                                date_column=date_column,
+                                time_column=time_column,
+                                csv_delimiter=csv_delimiter,
+                            )
+                        elif len(range_targets) > 0:
+                            targets = downloader.load_date_hours(
+                                input_mode="list",
+                                date_hours=range_targets
+                            )
+                        else:
+                            targets = downloader.load_date_hours(
+                                input_mode="list",
+                                date_hours=manual_targets
+                            )
+                        
+                        
                         total_entries = len(targets)
                         results = {
                             "downloaded": [],
@@ -613,6 +789,7 @@ with tab1:
                         }
 
                         for idx, date_hour in enumerate(targets, start=1):
+                            print(date_hour, type(date_hour))
                             progress_bar.progress((idx - 1) / max(total_entries, 1))
                             progress_text.markdown(f"Processing {idx}/{total_entries}: {date_hour}")
 
@@ -681,7 +858,7 @@ with tab1:
                                     data=f.read(),
                                     file_name=f"earthcare_downloads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
                                     mime="application/zip",
-                                    use_container_width=True
+                                    width='stretch'
                                 )
 
                             st.markdown("### Detailed Summary")
@@ -704,7 +881,7 @@ with tab1:
                                     elapsed
                                 ]
                             }
-                            st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(summary_data), width='stretch', hide_index=True)
                         else:
                             status_placeholder.update(label="⚠️ No files were downloaded", state="warning")
                             st.warning("⚠️ No files were downloaded. Check your CSV values, frame, and collection.")

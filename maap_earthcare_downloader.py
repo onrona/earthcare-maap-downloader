@@ -823,15 +823,15 @@ if __name__ == "__main__":
         # Current behavior
         downloader.download_products_by_time(
             product_type="ATL_EBD_2A",
-            frame=None,
+            frame='BA',
             date_hours=None,  # Ignored when input_mode="csv"
             input_mode="csv", # Using CSV input mode to leverage the date_column and csv_path parameters, even if we have the dates in a list. This allows for more flexible future use without changing the code.
-            csv_path=r"D:\EarthCARE\profiles_validation\Overpasses_20240801-20250831_100km_radius_GRASP_cleaned.csv", #"/home/onel/Downloads/overpasses_25072024_20102025_MATCHES_12Z.csv",
+            csv_path=r"C:\Users\usuario\Desktop\overpasses_adrian.csv", #"/home/onel/Downloads/overpasses_25072024_20102025_MATCHES_12Z.csv",
             date_column="yyyy-mm-dd",  # The column in the CSV that contains the date part
             time_column="hh:mm:ss.sss",  # The column in the CSV that contains the time part (optional)
             collection="EarthCAREL2InstChecked_MAAP",   # None = auto-detection
             search_minutes=6,
-            output_dir=r"D:\EarthCARE\profiles_validation\AFM", #"D:\EarthCARE\ESA_files",
+            output_dir=r"C:\Users\usuario\Desktop\AEBD_adrian", #"D:\EarthCARE\profiles_validation\AFM"
             overwrite=False,
         )
     else:
