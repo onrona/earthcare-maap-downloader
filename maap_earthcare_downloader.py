@@ -199,9 +199,12 @@ class MAAPEarthCAREDownloader:
         dt_end: str,
         limit: int = 5,
     ) -> list[dict]:
-        """Run STAC search with automatic retry on temporary failures."""
+        """Run STAC search with automatic retry on temporary failures.
+
+        MAAP STAC search endpoint is queried with GET parameters.
+        """
         url = f"{self.catalog_url.rstrip('/')}/search"
-        payload = {
+        params = {
             "collections": collections,
             "filter-lang": "cql2-text",
             "filter": cql_filter,
@@ -209,9 +212,11 @@ class MAAPEarthCAREDownloader:
             "limit": limit,
         }
 
+        headers = {"Authorization": f"Bearer {self.token}"}
+
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                response = requests.post(url, json=payload, timeout=60)
+                response = requests.get(url, params=params, headers=headers, timeout=60)
                 response.raise_for_status()
                 data = response.json()
                 return data.get("features", [])
@@ -874,3 +879,4 @@ if __name__ == "__main__":
 
 
 #%%
+

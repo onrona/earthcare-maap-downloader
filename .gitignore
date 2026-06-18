@@ -22,6 +22,7 @@ data/
 # Local credentials and environment files
 credentials.txt
 credentials.local.txt
+pruebas.ipynb
 .env
 .env.*
 
