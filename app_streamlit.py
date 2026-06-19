@@ -240,7 +240,6 @@ def parse_credentials_text(file_text: str) -> dict[str, str]:
         credentials[key.strip()] = value.strip()
     return credentials
 
-
 def detect_csv_delimiter(file_bytes: bytes) -> str | None:
     """Best-effort delimiter detection for uploaded CSV files."""
     sample = file_bytes[:4096].decode("utf-8", errors="ignore")
@@ -248,7 +247,6 @@ def detect_csv_delimiter(file_bytes: bytes) -> str | None:
         return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
     except csv.Error:
         return None
-
 
 def auto_detect_columns(columns: list[str]) -> tuple[str | None, str | None]:
     """Guess date and time columns from common names."""
@@ -267,11 +265,9 @@ def auto_detect_columns(columns: list[str]) -> tuple[str | None, str | None]:
     )
     return detected_date, detected_time
 
-
 def format_date_hour(selected_date: date, selected_time: dt_time) -> str:
     """Return a date-hour string accepted by the downloader."""
     return f"{selected_date.isoformat()} {selected_time.strftime('%H:%M:%S')}"
-
 
 def split_date_hour_text(raw_text: str) -> list[str]:
     """Split a text area with comma/newline/semicolon separated date-hour values."""
@@ -279,7 +275,6 @@ def split_date_hour_text(raw_text: str) -> list[str]:
         return []
     normalized = raw_text.replace(";", "\n").replace(",", "\n")
     return [line.strip() for line in normalized.splitlines() if line.strip()]
-
 
 def unique_preserving_order(values: list[str]) -> list[str]:
     """Remove duplicates while keeping the user-entered order."""
@@ -290,7 +285,6 @@ def unique_preserving_order(values: list[str]) -> list[str]:
             cleaned.append(value)
             seen.add(value)
     return cleaned
-
 
 def parse_time_list(raw_text: str) -> tuple[list[dt_time], list[str]]:
     """Parse HH:MM style time values for range generation."""
@@ -313,7 +307,6 @@ def parse_time_list(raw_text: str) -> tuple[list[dt_time], list[str]]:
             parsed.append(parsed_time)
 
     return parsed, invalid
-
 
 def build_range_targets(
     selected_range: date | tuple[date, ...],
@@ -917,12 +910,14 @@ with tab2:
     
     ### User Guide
     
-    1. **Credentials**: Enter your MAAP offline token, client ID, and client secret
-    2. **CSV File**: Upload your file with dates and times
-    3. **Product**: Select the category and specific product
-    4. **Start**: Click "Start Download"
-    5. **Results**: Download files as ZIP
-    
+    1. **Credentials**: Enter your MAAP offline token, client ID, and client secret.
+    2. **CSV File**: Upload your file with dates and times. *(Alternatively, you can skip the CSV upload and select your desired dates directly via the web application interface).*
+    3. **Product**: Select the category and specific product.
+    4. **Start**: Click "Start Download".
+    5. **Results**: Download files as ZIP.
+                
+    *Note: The system supports bulk date processing via CSV upload as well as manual date selection for quick, on-the-fly queries through the app's built-in calendar picker.*
+                
     ### CSV File Requirements
     
     Your CSV file must contain:
@@ -930,7 +925,7 @@ with tab2:
     - A **time** column (format: hh:mm:ss.sss)
     
     The system will automatically detect these columns by looking for:
-    - Names like: "date", "fecha", "day", etc.
+    - Names like: "date", "fecha", "day", "yyyy-mm-dd", etc.
     - Names like: "time", "hora", "hh:mm:ss.sss", etc.
     
     Example of valid CSV:
@@ -942,9 +937,8 @@ with tab2:
     
     ### 🔗 Useful Links
     
-    - [ESA MAAP Portal](https://catalog.maap.eo.esa.int/)
-    - [EarthCARE Mission](https://www.esa.int/Applications/Observing_the_Earth/EarthCARE)
-    - [EarthCARE Documentation](https://www.esa.int/Applications/Observing_the_Earth/EarthCARE)
+    - [ESA MAAP Portal](https://portal.maap.eo.esa.int/earthcare/join-collaborative-environment/)
+    - [EarthCARE Mission](https://earth.esa.int/eogateway/missions/earthcare)
     """)
 
 with tab3:
@@ -969,7 +963,7 @@ with tab3:
     - Product availability
     - File sizes
     
-    Typically takes between minutes to hours.
+    Typically takes between seconds to minutes.
     
     #### Where can I get MAAP credentials?
     Use your ESA MAAP account and generate the required token and client credentials.
